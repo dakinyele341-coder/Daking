@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Brand palette as raw hex, for use in plain CSS (focus ring, etc.). */
+    --paper: #faf7f0;
+    --ink: #2c3e50;
+    --ink-muted: #5c6f7e;
+    --chalkboard: #1c2a24;
+
+    /* shadcn tokens retuned to the paper/ink identity (HSL triplets). The whole
+       app reads from these, so existing bg-background / text-foreground /
+       border-border / bg-muted classes pick up the brand automatically. */
+    --background: 40 33% 96%; /* paper  #FAF7F0 */
+    --foreground: 210 29% 24%; /* ink    #2C3E50 */
+    --muted: 40 36% 90%; /* warm paper tint */
+    --muted-foreground: 206 16% 43%; /* ink-muted #5C6F7E */
+    --border: 40 28% 83%; /* soft warm hairline */
+    --input: 40 28% 83%;
+    --primary: 210 29% 24%; /* ink */
+    --primary-foreground: 40 33% 96%; /* paper */
+    --secondary: 40 36% 90%;
+    --secondary-foreground: 210 29% 24%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 40 33% 96%;
+    --ring: 210 29% 24%; /* ink focus ring */
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Accessibility: a visible 2px ink focus ring on every focusable element,
+     not the browser default blue. */
+  :focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+}
+
+/* Respect users who ask for less motion: kill transitions, animations, and
+   smooth scrolling so all state changes are instant. The landing wipe also
+   checks this in JS and degrades to a hard cut. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
