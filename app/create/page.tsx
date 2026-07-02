@@ -308,7 +308,7 @@ export default function CreatePage() {
   }
 
   return (
-    <main className="container max-w-3xl py-10">
+    <main className="container max-w-3xl py-5 sm:py-10">
       <AppHeader />
 
       {/* Free long-form trial banner — remind free users what they have left. */}
@@ -396,7 +396,7 @@ export default function CreatePage() {
                 type="button"
                 onClick={() => setComplexity(opt.value)}
                 className={cn(
-                  "rounded-md border px-3 py-2 text-left transition-colors",
+                  "rounded-md border px-2 py-2 text-left transition-colors sm:px-3",
                   complexity === opt.value
                     ? "border-chalkboard bg-chalkboard text-paper"
                     : "border-ink/20 hover:bg-muted",
@@ -405,7 +405,7 @@ export default function CreatePage() {
                 <span className="block text-sm font-medium">{opt.label}</span>
                 <span
                   className={cn(
-                    "block text-xs",
+                    "hidden text-xs sm:block",
                     complexity === opt.value ? "text-paper/70" : "text-muted-foreground",
                   )}
                 >

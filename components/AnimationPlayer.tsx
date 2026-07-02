@@ -63,6 +63,23 @@ function loadImage(url: string): Promise<HTMLImageElement | null> {
   });
 }
 
+/**
+ * Ensures the handwritten canvas font is loaded BEFORE the first stroke draws.
+ * Canvas text doesn't trigger CSS font loading, so without this the first
+ * playback can silently fall back to a system font mid-scene.
+ */
+async function preloadCanvasFonts(): Promise<void> {
+  try {
+    if (typeof document === "undefined" || !document.fonts) return;
+    await Promise.all([
+      document.fonts.load('28px "Kalam"'),
+      document.fonts.load('44px "Kalam"'),
+    ]);
+  } catch {
+    // Non-fatal: worst case the canvas uses the fallback font.
+  }
+}
+
 export function AnimationPlayer({
   animation,
   animationId,
@@ -77,6 +94,8 @@ export function AnimationPlayer({
   const [progress, setProgress] = useState(0);
   const [studyMode, setStudyMode] = useState<StudyMode>("none");
   const [captionsOn, setCaptionsOn] = useState(true);
+  /** Current subtitle line (one phrase at a time, synced to the voice). */
+  const [caption, setCaption] = useState("");
 
   const sceneCount = animation.scenes.length;
   const currentNarration = animation.scenes[sceneIndex]?.narration ?? "";
@@ -100,8 +119,8 @@ export function AnimationPlayer({
     const icons: IconCache = new Map();
     const images: ImageCache = new Map();
 
-    // Preload icons and illustration images in parallel. A missing asset
-    // shouldn't block playback — it just won't be drawn.
+    // Preload icons, illustration images, and the canvas font in parallel.
+    // A missing asset shouldn't block playback — it just won't be drawn.
     const iconLoaders = collectIconNames(animation).map(async (name) => {
       const parsed = await loadIcon(name);
       if (parsed) icons.set(name, parsed);
@@ -111,12 +130,13 @@ export function AnimationPlayer({
       if (img) images.set(url, img);
     });
 
-    void Promise.all([...iconLoaders, ...imageLoaders]).then(() => {
+    void Promise.all([...iconLoaders, ...imageLoaders, preloadCanvasFonts()]).then(() => {
       if (cancelled) return;
       controllerRef.current = new AnimationController(ctx, animation, icons, images, {
         onScene: (i) => setSceneIndex(i),
         onProgress: (f) => setProgress(f),
         onStateChange: (s) => setState(s),
+        onCaption: (text) => setCaption(text),
         onComplete: () => {
           track.animationCompleted(animation.scenes.length);
         },
@@ -161,24 +181,27 @@ export function AnimationPlayer({
           aria-label={`Whiteboard animation. Current narration: ${currentNarration}`}
         />
 
-        {/* Subtitles — the spoken narration, shown as a caption while playing. */}
+        {/* Subtitles — one spoken line at a time, synced to the voice. */}
         {captionsOn &&
-          currentNarration &&
+          caption &&
           (state === "playing" || state === "paused") && (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-3 sm:p-4">
-              <p className="max-w-[92%] rounded-md bg-ink/85 px-3 py-1.5 text-center text-sm font-medium text-paper sm:text-base">
-                {currentNarration}
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-2 sm:p-4">
+              <p
+                key={caption}
+                className="max-w-[94%] animate-caption-in rounded-md bg-ink/85 px-3 py-1.5 text-center text-[13px] font-medium leading-snug text-paper sm:text-base"
+              >
+                {caption}
               </p>
             </div>
           )}
       </div>
 
       {/* Controls */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
         <button
           onClick={isFinished ? handleReplay : handleToggle}
           disabled={!ready}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          className="shrink-0 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50 sm:px-4"
         >
           {!ready
             ? "Loading…"
@@ -189,12 +212,13 @@ export function AnimationPlayer({
                 : "Play"}
         </button>
 
-        <span className="text-sm text-muted-foreground">
-          Scene {Math.min(sceneIndex + 1, sceneCount)} / {sceneCount}
+        <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:text-sm">
+          <span className="hidden sm:inline">Scene </span>
+          {Math.min(sceneIndex + 1, sceneCount)} / {sceneCount}
         </span>
 
         {/* Timeline */}
-        <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+        <div className="h-2 min-w-12 flex-1 overflow-hidden rounded-full bg-muted">
           <div
             className="h-full rounded-full bg-primary transition-[width] duration-150"
             style={{ width: `${Math.round(progress * 100)}%` }}

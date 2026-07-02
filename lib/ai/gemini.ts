@@ -80,7 +80,7 @@ OUTPUT: Return ONLY a single JSON object (no markdown, no commentary) matching E
         { "type": "circle", "cx": n, "cy": n, "r": n, "color": "#hex" },
         { "type": "rect",   "x": n, "y": n, "w": n, "h": n, "color": "#hex" },
         { "type": "icon",   "icon": ICON, "x": n, "y": n, "size": n },               // size 40-160; symbolic accent only
-        { "type": "text",   "text": string, "x": n, "y": n, "size": n, "color": "#hex" }, // size 20-48; <= 120 chars
+        { "type": "text",   "text": string, "x": n, "y": n, "size": n, "color": "#hex", "highlight": true }, // size 20-48; <= 120 chars; "highlight" optional
         { "type": "path",   "d": "SVG path data", "fill": "#color" },               // simple custom shape; "fill" optional
         { "type": "image",  "prompt": string, "labels": [string], "x": n, "y": n, "w": n, "h": n } // a REAL generated illustration (see below)
       ]
@@ -117,17 +117,23 @@ CHOOSE THE RIGHT VISUALS — be intelligent, like a great explainer video:
 
 COLOR — used well, color is what separates a premium explainer from a sketch. Default ink is dark slate; add PURPOSEFUL accents with "color":
 - Palette (use ONLY these): red "#E5484D" = the key thing / warnings / heat; blue "#2563EB" = secondary concept / cool / water; green "#16A34A" = growth / positive / correct; orange "#D97706" = energy / highlights.
+- A colored "circle" or "rect" doesn't just get a colored outline — the renderer WASHES a soft felt-tip fill into it after the outline draws (a satisfying coloring-in moment). So color the shapes that carry meaning.
 - Give color MEANING and keep it consistent across the whole video (if arteries are red in scene 2, they're red in scene 6).
 - 1-3 colored elements per diagram scene, the rest default ink. Titles and body text stay default ink; color only the accent word/arrow/shape that carries the point. Never rainbow-soup.
+- "highlight": true on a "text" element sweeps a yellow marker under it after it writes in. Use it on THE single most important label of a scene — at most ONE per scene, and not every scene.
 
-LAYOUT — compose every diagram scene like a designed slide:
-- Keep every element fully inside the ${CANVAS_WIDTH}x${CANVAS_HEIGHT} canvas with ~40px margins.
-- Most diagram scenes should open with a short title: "text" at size 34-42, centered horizontally (x ≈ ${Math.round(CANVAS_WIDTH / 2)} minus half its width), y ≈ 80. Content lives below y ≈ 140.
-- Align things: same-row boxes share a y; same-column labels share an x. Distribute evenly — a 3-step flow sits at x ≈ 140, 520, 900. Boxes for steps/concepts: ~200-300 wide, ~90-130 tall, with the label text centered INSIDE (text y ≈ box y + half height).
-- Arrows are short and purposeful: start at the edge of one element, end at the edge of the next (never across the whole canvas, never crossing other elements).
+COMPOSITION TEMPLATES — compose every diagram scene like a designed slide. Pick ONE template per scene and use its coordinates (adjust modestly to fit content; keep the structure). Canvas is ${CANVAS_WIDTH}x${CANVAS_HEIGHT}, ~40px margins.
+- CENTER-FOCUS (introducing one thing): title text centered at y≈80 (size 36-42); the main visual centered around (640, 390) — an "image" box x≈330,y≈150,w≈620,h≈460, OR a large shape/diagram; 2-3 short labels around it at y≈340 (x≈110 left, x≈980 right) and y≈630 bottom-center.
+- LEFT-RIGHT (two things compared / cause→effect): title centered y≈80; left concept box x≈110,y≈220,w≈380,h≈300; right box x≈790,y≈220,w≈380,h≈300; ONE arrow from (500,370) to (780,370); labels under each box at y≈570.
+- TOP-DOWN FLOW (process steps): title x≈80,y≈90 (left-aligned); three step rects w≈300,h≈120 centered at x≈490: y≈160, y≈340, y≈520; short arrows between them (640,285)→(640,335) and (640,465)→(640,515); step label text centered INSIDE each rect (y ≈ rect y + 72).
+- BEFORE-AFTER (contrast / change): a vertical divider "line" from (640,110) to (640,650); left content in x 80-560, right content in x 720-1200; a label over each half at y≈100.
+- LIST (3 key parts/facts): title centered y≈80; three columns at x≈120, x≈470, x≈820, each w≈340: an icon or small shape at y≈200, a bold label at y≈380, a short detail text at y≈430.
+- ZOOM-IN (detail of a bigger picture): small context visual x≈60,y≈180,w≈380,h≈380; enlarged detail x≈540,y≈110,w≈660,h≈470; connector line (440,370)→(540,340); caption under the detail at y≈630.
+Rules that apply to every template:
+- Same-row boxes share a y; same-column labels share an x. Arrows start at the edge of one element and end at the edge of the next — never across the whole canvas, never crossing other elements.
 - Never overlap two text labels or an icon and text. Keep ~50px between labels.
 - On an illustrated scene, let the "image" fill most of the canvas; add at most a short caption — no other elements over it.
-- Build the explanation progressively across scenes, each one advancing the idea one step.
+- VARY templates across scenes (never the same one twice in a row) and build the explanation progressively, each scene advancing the idea one step.
 
 ICON must be EXACTLY one of these (no others, no invented names): ${ALLOWED_ICONS.join(", ")}.
 If no icon fits, use an "image" or a "text" label instead.

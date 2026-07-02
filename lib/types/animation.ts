@@ -123,6 +123,11 @@ export interface TextElement {
   /** Font size in canvas px. */
   size?: number;
   color?: string;
+  /**
+   * Marks the single most important label in a scene: after the text draws,
+   * a yellow marker highlight sweeps underneath it.
+   */
+  highlight?: boolean;
 }
 
 /**

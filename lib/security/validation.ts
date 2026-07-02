@@ -185,6 +185,8 @@ const textSchema = z.object({
   y: coordY,
   size: z.number().finite().min(8).max(120).optional(),
   color: strokeColor,
+  // Yellow marker sweep under the scene's single most important label.
+  highlight: z.boolean().optional(),
 });
 
 // Freeform SVG path. Restrict to the path-data charset (commands + numbers +

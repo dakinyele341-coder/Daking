@@ -38,11 +38,11 @@ export function AppHeader() {
   }, []);
 
   return (
-    <header className="mb-8 flex items-center justify-between gap-4">
-      <Link href="/" aria-label="Skribbl home">
-        <Brand />
+    <header className="mb-6 flex items-center justify-between gap-2 sm:mb-8 sm:gap-4">
+      <Link href="/" aria-label="Skribbl home" className="shrink-0">
+        <Brand logoClassName="h-6 w-6 sm:h-7 sm:w-7" textClassName="text-xl sm:text-2xl" />
       </Link>
-      <nav aria-label="Main" className="flex items-center gap-1 sm:gap-2">
+      <nav aria-label="Main" className="flex items-center gap-0.5 sm:gap-2">
         {NAV_LINKS.map((link) => {
           const current = pathname === link.href;
           return (
@@ -51,7 +51,7 @@ export function AppHeader() {
               href={link.href}
               aria-current={current ? "page" : undefined}
               className={cn(
-                "rounded-md px-2.5 py-1.5 text-sm transition-colors",
+                "rounded-md px-2 py-1.5 text-[13px] transition-colors sm:px-2.5 sm:text-sm",
                 current
                   ? "bg-chalkboard font-medium text-paper"
                   : "text-muted-foreground hover:bg-muted hover:text-ink",
@@ -64,7 +64,7 @@ export function AppHeader() {
         {isAdmin && (
           <Link
             href="/admin"
-            className="rounded-md px-2.5 py-1.5 text-sm font-medium text-marker hover:bg-muted"
+            className="rounded-md px-2 py-1.5 text-[13px] font-medium text-marker hover:bg-muted sm:px-2.5 sm:text-sm"
           >
             Admin
           </Link>

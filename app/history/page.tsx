@@ -59,7 +59,7 @@ export default async function HistoryPage() {
   }
 
   return (
-    <main className="container max-w-3xl py-10">
+    <main className="container max-w-3xl py-5 sm:py-10">
       <AppHeader />
 
       <h1 className="mb-6 font-display text-2xl font-bold tracking-tight">History</h1>

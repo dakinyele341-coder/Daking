@@ -44,7 +44,23 @@ export const SPEED = {
   MS_PER_WORD: 360,
   /** Small lead-in before speech actually starts (engine warm-up). */
   NARRATION_LEAD_MS: 250,
+  /**
+   * Max factor the drawing may be sped up to fit the narration estimate. A
+   * drawing-heavy scene compresses toward the spoken duration instead of
+   * trailing long after the voice has finished — but never so fast it blurs.
+   */
+  MAX_DRAW_SPEEDUP: 1.6,
+  /**
+   * Once the voice has ACTUALLY finished but strokes are still going, the
+   * clock runs this much faster so the board catches up within a beat.
+   */
+  CATCHUP_FACTOR: 1.8,
+  /** Floor on a scene's drawing span so compression can't make it jarring. */
+  MIN_SCENE_MS: 1800,
 } as const;
+
+/** Longest caption line shown at once (chars). Roughly one spoken phrase. */
+const CAPTION_MAX_CHARS = 64;
 
 /** Hard ceiling on how long a single scene may take, even waiting on speech. */
 const SCENE_SAFETY_MS = 20_000;
@@ -56,6 +72,8 @@ export interface ControllerCallbacks {
   onProgress?: (fraction: number) => void;
   onStateChange?: (state: PlaybackState) => void;
   onComplete?: () => void;
+  /** Fires whenever the caption line changes (line-by-line subtitles). */
+  onCaption?: (text: string) => void;
 }
 
 interface ScheduledElement {
@@ -64,13 +82,28 @@ interface ScheduledElement {
   end: number; // ms from scene start
 }
 
+/** One subtitle line: its text plus its character range in the narration. */
+interface CaptionChunk {
+  text: string;
+  /** Index of the chunk's first character in the full narration string. */
+  start: number;
+  /** Index just past the chunk's last character. */
+  end: number;
+}
+
 interface ScenePlan {
   drawDuration: number;
+  narrationMs: number;
   elements: ScheduledElement[];
+  captions: CaptionChunk[];
 }
 
 function easeInOutQuad(t: number): number {
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+function clamp01Local(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function countWords(text: string): number {
@@ -83,6 +116,69 @@ function estimateNarrationMs(narration: string): number {
   const words = countWords(narration);
   if (words === 0) return 0;
   return SPEED.NARRATION_LEAD_MS + words * SPEED.MS_PER_WORD;
+}
+
+/**
+ * Splits a narration into short caption lines shown one after another:
+ * sentence boundaries first, then long sentences at commas/word boundaries so
+ * no line exceeds ~CAPTION_MAX_CHARS. Character ranges are tracked against the
+ * ORIGINAL string so speech `onboundary` charIndex events map straight onto a
+ * chunk.
+ */
+export function chunkNarration(narration: string): CaptionChunk[] {
+  const chunks: CaptionChunk[] = [];
+
+  // Sentences (keep terminal punctuation). Falls back to the whole string.
+  const sentenceRe = /[^.!?…]+[.!?…]*/g;
+  let match: RegExpExecArray | null;
+  const sentences: { text: string; start: number }[] = [];
+  while ((match = sentenceRe.exec(narration)) !== null) {
+    if (match[0].trim().length > 0) {
+      sentences.push({ text: match[0], start: match.index });
+    }
+  }
+  if (sentences.length === 0) {
+    const t = narration.trim();
+    if (t) sentences.push({ text: narration, start: 0 });
+  }
+
+  for (const sentence of sentences) {
+    // Short enough → one caption line.
+    if (sentence.text.trim().length <= CAPTION_MAX_CHARS) {
+      pushChunk(chunks, narration, sentence.start, sentence.start + sentence.text.length);
+      continue;
+    }
+    // Too long → split at word boundaries, preferring a comma/semicolon break.
+    let cursor = sentence.start;
+    const sentenceEnd = sentence.start + sentence.text.length;
+    while (cursor < sentenceEnd) {
+      const remaining = sentenceEnd - cursor;
+      if (remaining <= CAPTION_MAX_CHARS) {
+        pushChunk(chunks, narration, cursor, sentenceEnd);
+        break;
+      }
+      const window = narration.slice(cursor, cursor + CAPTION_MAX_CHARS + 1);
+      const comma = Math.max(window.lastIndexOf(","), window.lastIndexOf(";"));
+      const space = window.lastIndexOf(" ");
+      // Prefer a punctuation break past the halfway point, else last space.
+      const cut =
+        comma > CAPTION_MAX_CHARS / 2 ? comma + 1 : space > 0 ? space : CAPTION_MAX_CHARS;
+      pushChunk(chunks, narration, cursor, cursor + cut);
+      cursor += cut;
+    }
+  }
+
+  return chunks;
+}
+
+function pushChunk(
+  chunks: CaptionChunk[],
+  narration: string,
+  start: number,
+  end: number,
+): void {
+  const text = narration.slice(start, end).trim();
+  if (text.length > 0) chunks.push({ text, start, end });
 }
 
 export class AnimationController {
@@ -99,8 +195,16 @@ export class AnimationController {
   private sceneIndex = 0;
 
   private rafId: number | null = null;
-  private sceneStartedAt = 0;
-  private pausedAt = 0;
+  /**
+   * Scene time is a VIRTUAL clock accumulated per frame — it can run faster
+   * than real time (catch-up once the voice finishes while strokes remain)
+   * and simply stops accumulating while paused.
+   */
+  private virtualElapsed = 0;
+  /** Real ms since the scene began (drives caption estimation — speech runs
+   * in real time regardless of the drawing's catch-up scaling). */
+  private realElapsed = 0;
+  private lastFrameAt = 0;
 
   // Per-scene completion signals.
   private narrationStarted = false;
@@ -108,6 +212,11 @@ export class AnimationController {
   private speechDone = false;
   /** Generation counter so a stale utterance's onend can't settle a new scene. */
   private speechGen = 0;
+
+  // Caption (line-by-line subtitle) tracking.
+  private captionIndex = -1;
+  /** True once this scene received a real speech word-boundary event. */
+  private boundarySeen = false;
 
   private voice: SpeechSynthesisVoice | null = null;
 
@@ -154,12 +263,19 @@ export class AnimationController {
       rawDuration += dur;
     });
 
-    // 2. Stretch (never compress) the schedule so the drawing spans roughly the
-    //    spoken narration — strokes land WHILE the matching words are said,
-    //    instead of finishing early and idling. Event-driven advance (waiting
-    //    on speech `onend`) still corrects any estimate drift.
+    // 2. Fit the schedule to the spoken narration: stretch a light scene so
+    //    strokes land WHILE the words are said, and COMPRESS a drawing-heavy
+    //    scene toward the narration (capped at MAX_DRAW_SPEEDUP so it never
+    //    blurs) so the board doesn't keep scratching long after the voice
+    //    stopped. Event-driven advance still corrects any estimate drift, and
+    //    the runtime catch-up clock handles a voice that's faster than the
+    //    estimate.
     const narrationMs = estimateNarrationMs(narration);
-    const span = Math.max(rawDuration, narrationMs);
+    const span = Math.max(
+      Math.min(rawDuration, Math.max(narrationMs, rawDuration / SPEED.MAX_DRAW_SPEEDUP)),
+      narrationMs,
+      SPEED.MIN_SCENE_MS,
+    );
     const scale = rawDuration > 0 ? span / rawDuration : 1;
     if (scale !== 1) {
       for (const s of scheduled) {
@@ -168,7 +284,12 @@ export class AnimationController {
       }
     }
 
-    return { drawDuration: span, elements: scheduled };
+    return {
+      drawDuration: span,
+      narrationMs,
+      elements: scheduled,
+      captions: chunkNarration(narration),
+    };
   }
 
   // ---- Public controls ------------------------------------------------------
@@ -185,7 +306,6 @@ export class AnimationController {
 
   pause(): void {
     if (this.state !== "playing") return;
-    this.pausedAt = this.now();
     this.cancelRaf();
     this.safeSpeech((s) => s.pause());
     this.setState("paused");
@@ -193,7 +313,7 @@ export class AnimationController {
 
   resume(): void {
     if (this.state !== "paused") return;
-    this.sceneStartedAt += this.now() - this.pausedAt;
+    this.lastFrameAt = this.now(); // don't count the paused gap
     this.safeSpeech((s) => s.resume());
     this.setState("playing");
     this.loop();
@@ -243,12 +363,18 @@ export class AnimationController {
   // ---- Internal -------------------------------------------------------------
 
   private beginScene(index: number): void {
-    this.sceneStartedAt = this.now();
+    this.virtualElapsed = 0;
+    this.realElapsed = 0;
+    this.lastFrameAt = this.now();
     this.narrationStarted = false;
     this.drawingDone = false;
     this.speechDone = false;
     this.speechGen++; // any older utterance callback is now stale
+    this.captionIndex = -1;
+    this.boundarySeen = false;
     this.callbacks.onScene?.(index, this.sceneCount);
+    // Show the first caption line immediately (before any boundary event).
+    this.setCaption(index, 0);
   }
 
   private loop = (): void => {
@@ -261,12 +387,27 @@ export class AnimationController {
       return;
     }
 
-    const elapsed = this.now() - this.sceneStartedAt;
+    // Advance the clocks. The virtual (drawing) clock runs faster once the
+    // voice has finished but strokes remain — the board catches up within a
+    // beat instead of scratching on in silence.
+    const now = this.now();
+    const dt = Math.max(0, now - this.lastFrameAt);
+    this.lastFrameAt = now;
+    const catchingUp = this.speechDone && !this.drawingDone;
+    this.virtualElapsed += dt * (catchingUp ? SPEED.CATCHUP_FACTOR : 1);
+    this.realElapsed += dt;
+    const elapsed = this.virtualElapsed;
 
     // Kick off narration once, at the start of the scene.
     if (!this.narrationStarted) {
       this.narrationStarted = true;
       this.speak(scene.narration);
+    }
+
+    // Caption fallback: no boundary events from this speech engine → advance
+    // the line by time, proportional to the narration estimate.
+    if (!this.boundarySeen && !this.speechDone && plan.captions.length > 1) {
+      this.estimateCaptionFromTime(plan);
     }
 
     this.renderScene(this.sceneIndex, elapsed);
@@ -275,13 +416,52 @@ export class AnimationController {
     this.reportProgress(elapsed, plan);
 
     // Advance once both drawing and speech are done, or the safety cap trips.
-    if ((this.drawingDone && this.speechDone) || elapsed >= SCENE_SAFETY_MS) {
+    if ((this.drawingDone && this.speechDone) || this.realElapsed >= SCENE_SAFETY_MS) {
       this.advanceScene();
       return;
     }
 
     this.rafId = requestAnimationFrame(this.loop);
   };
+
+  // ---- Captions (line-by-line subtitles) -------------------------------------
+
+  /** Shows caption line `chunkIndex` of the given scene (if it changed). */
+  private setCaption(sceneIndex: number, chunkIndex: number): void {
+    const captions = this.plans[sceneIndex]?.captions ?? [];
+    if (captions.length === 0) {
+      if (this.captionIndex !== -1) return;
+      this.callbacks.onCaption?.("");
+      return;
+    }
+    const clamped = Math.max(0, Math.min(chunkIndex, captions.length - 1));
+    if (clamped === this.captionIndex) return;
+    this.captionIndex = clamped;
+    this.callbacks.onCaption?.(captions[clamped]!.text);
+  }
+
+  /** Maps a speech charIndex (from `onboundary`) to its caption line. */
+  private captionFromCharIndex(charIndex: number): void {
+    const captions = this.plans[this.sceneIndex]?.captions ?? [];
+    for (let i = captions.length - 1; i >= 0; i--) {
+      if (charIndex >= captions[i]!.start) {
+        this.setCaption(this.sceneIndex, i);
+        return;
+      }
+    }
+  }
+
+  /** Time-based caption fallback for engines without boundary events. */
+  private estimateCaptionFromTime(plan: ScenePlan): void {
+    const speakable = Math.max(1, plan.narrationMs - SPEED.NARRATION_LEAD_MS);
+    const fraction = clamp01Local(
+      (this.realElapsed - SPEED.NARRATION_LEAD_MS) / speakable,
+    );
+    const captions = plan.captions;
+    const last = captions[captions.length - 1]!;
+    const charIndex = fraction * last.end;
+    this.captionFromCharIndex(charIndex);
+  }
 
   private renderScene(sceneIndex: number, elapsed: number): void {
     const plan = this.plans[sceneIndex];
@@ -361,6 +541,14 @@ export class AnimationController {
       if (this.voice) utterance.voice = this.voice;
       utterance.onend = () => this.settleSpeech(token);
       utterance.onerror = () => this.settleSpeech(token);
+      // Word-boundary events sync the caption line to the actual voice.
+      // (Not fired by every engine — the loop has a time-based fallback.)
+      utterance.onboundary = (e) => {
+        if (token !== this.speechGen) return; // stale scene
+        if (typeof e.charIndex !== "number") return;
+        this.boundarySeen = true;
+        this.captionFromCharIndex(e.charIndex);
+      };
       synth.speak(utterance);
     });
 

@@ -28,6 +28,16 @@ import type { AnimationElement } from "@/lib/types/animation";
 export const INK_COLOR = "#2C3E50"; // `ink` brand token
 export const HANDWRITTEN_FONT = '"Kalam", "Caveat", cursive';
 
+/** Yellow marker highlight swept under important text. */
+const HIGHLIGHT_FILL = "rgba(255, 214, 0, 0.4)";
+/** Opacity of the felt-tip color wash inside colored shapes. */
+const FILL_WASH_ALPHA = 0.16;
+/**
+ * Shapes split their progress: the outline strokes in first, then the color
+ * washes in. Same split for text + its highlight sweep.
+ */
+const OUTLINE_PHASE = 0.78;
+
 const DEFAULT_STROKE_WIDTH = 3;
 const WOBBLE_AMPLITUDE = 1.5; // px, perpendicular
 const WOBBLE_STEP = 10; // px between samples
@@ -189,6 +199,47 @@ function applyStroke(
   ctx.lineJoin = "round";
 }
 
+/**
+ * Splits an element's 0..1 progress into an outline phase and a color-wash
+ * phase. Elements without an explicit color skip the wash (outline spans the
+ * whole progress), so color stays a deliberate emphasis, not noise.
+ */
+function splitPhases(progress: number, hasWash: boolean): {
+  outline: number;
+  wash: number;
+} {
+  if (!hasWash) return { outline: clamp01(progress), wash: 0 };
+  return {
+    outline: clamp01(progress / OUTLINE_PHASE),
+    wash: clamp01((progress - OUTLINE_PHASE) / (1 - OUTLINE_PHASE)),
+  };
+}
+
+/**
+ * Washes a felt-tip color fill into a closed path with a left-to-right wipe —
+ * the "coloring in" moment after an outline finishes drawing.
+ */
+function washFill(
+  ctx: CanvasRenderingContext2D,
+  buildPath: () => void,
+  color: string,
+  bounds: { x: number; y: number; w: number; h: number },
+  wash: number,
+): void {
+  if (wash <= 0) return;
+  ctx.save();
+  ctx.beginPath();
+  // Clip rect grows left → right; padded so wobbly strokes stay inside.
+  ctx.rect(bounds.x - 8, bounds.y - 8, (bounds.w + 16) * wash, bounds.h + 16);
+  ctx.clip();
+  ctx.globalAlpha = FILL_WASH_ALPHA;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  buildPath();
+  ctx.fill();
+  ctx.restore();
+}
+
 // ---- Element drawers --------------------------------------------------------
 
 function drawLine(
@@ -245,9 +296,27 @@ function drawCircle(
   color?: string,
   width?: number,
 ): void {
+  const { outline, wash } = splitPhases(progress, Boolean(color));
+  const pts = buildWobblyCircle(cx, cy, r);
+
+  // Color wash first so the outline strokes sit crisply on top.
+  if (color) {
+    washFill(
+      ctx,
+      () => {
+        ctx.moveTo(pts[0]!.x, pts[0]!.y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y);
+        ctx.closePath();
+      },
+      color,
+      { x: cx - r, y: cy - r, w: r * 2, h: r * 2 },
+      wash,
+    );
+  }
+
   applyStroke(ctx, color, width);
   ctx.setLineDash([]);
-  strokePartialPolyline(ctx, buildWobblyCircle(cx, cy, r), progress);
+  strokePartialPolyline(ctx, pts, outline);
 }
 
 function drawRect(
@@ -260,6 +329,19 @@ function drawRect(
   color?: string,
   width?: number,
 ): void {
+  const { outline, wash } = splitPhases(progress, Boolean(color));
+
+  // Color wash first so the outline strokes sit crisply on top.
+  if (color) {
+    washFill(
+      ctx,
+      () => ctx.rect(x, y, w, h),
+      color,
+      { x, y, w, h },
+      wash,
+    );
+  }
+
   // Four edges drawn one after another (top → right → bottom → left).
   const corners: Point[] = [
     { x, y },
@@ -272,7 +354,7 @@ function drawRect(
   const edges = 4;
   for (let i = 0; i < edges; i++) {
     const edgeStart = i / edges;
-    const local = clamp01((progress - edgeStart) * edges);
+    const local = clamp01((outline - edgeStart) * edges);
     if (local <= 0) break;
     const a = corners[i]!;
     const b = corners[i + 1]!;
@@ -337,16 +419,41 @@ function drawText(
   progress: number,
   size?: number,
   color?: string,
+  highlight?: boolean,
 ): void {
   const fontSize = size ?? 28;
-  const count = Math.floor(clamp01(progress) * text.length);
+  // Highlighted text writes in first, then the marker sweeps under it.
+  const { outline: writeP, wash: sweepP } = splitPhases(
+    progress,
+    Boolean(highlight),
+  );
+  const count = Math.floor(clamp01(writeP) * text.length);
   if (count <= 0) return;
 
   ctx.save();
   ctx.setLineDash([]);
   ctx.font = `${fontSize}px ${HANDWRITTEN_FONT}`;
-  ctx.fillStyle = color ?? INK_COLOR;
   ctx.textBaseline = "alphabetic";
+
+  // Yellow marker sweep — drawn first (under the letters), left to right,
+  // slightly wobbly like a real highlighter stroke.
+  if (highlight && sweepP > 0) {
+    const width = ctx.measureText(text).width;
+    const rand = seededRandom(hashCoords(x, y, width));
+    const h = Math.max(10, fontSize * 0.42);
+    const yTop = y - h * 0.55; // overlaps the lower half of the letters
+    const sw = width * sweepP;
+    ctx.fillStyle = HIGHLIGHT_FILL;
+    ctx.beginPath();
+    ctx.moveTo(x - 3, yTop + (rand() - 0.5) * 3);
+    ctx.lineTo(x + sw + 3, yTop + (rand() - 0.5) * 3);
+    ctx.lineTo(x + sw + 3, yTop + h + (rand() - 0.5) * 3);
+    ctx.lineTo(x - 3, yTop + h + (rand() - 0.5) * 3);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.fillStyle = color ?? INK_COLOR;
   ctx.fillText(text.slice(0, count), x, y);
   ctx.restore();
 }
@@ -604,7 +711,7 @@ export function drawElement(
       break;
     }
     case "text":
-      drawText(ctx, element.text, element.x, element.y, progress, element.size, element.color);
+      drawText(ctx, element.text, element.x, element.y, progress, element.size, element.color, element.highlight);
       break;
     case "path":
       drawPath(ctx, element.d, progress, element.color, element.strokeWidth, element.fill);

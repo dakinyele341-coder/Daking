@@ -75,7 +75,7 @@ export default function SettingsPage() {
       : 0;
 
   return (
-    <main className="container max-w-3xl py-10">
+    <main className="container max-w-3xl py-5 sm:py-10">
       <AppHeader />
 
       <div className="mb-6 flex items-center justify-between">
