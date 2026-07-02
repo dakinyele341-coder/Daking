@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimationPlayer } from "@/components/AnimationPlayer";
 import { AppHeader } from "@/components/AppHeader";
+import type { VoiceMode } from "@/lib/animation/controller";
 import type { AnimationData, AnimationFormat } from "@/lib/types/animation";
 import type { Complexity } from "@/lib/types/database";
 import { FREE_LONG_FORM_LIMIT } from "@/lib/plans";
@@ -97,6 +98,8 @@ export default function CreatePage() {
   const [complexity, setComplexity] = useState<Complexity>("standard");
   const [format, setFormat] = useState<AnimationFormat>("standard");
   const [usage, setUsage] = useState<UsageInfo | null>(null);
+  const [voiceMode, setVoiceMode] = useState<VoiceMode>("browser");
+  const [enhancedVoiceAvailable, setEnhancedVoiceAvailable] = useState(false);
   const [files, setFiles] = useState<AttachedFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,6 +147,42 @@ export default function CreatePage() {
   useEffect(() => {
     void refreshUsage();
   }, [refreshUsage]);
+
+  // Feature flags (e.g. whether the enhanced AI voice is configured) +
+  // restore the user's saved voice preference.
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const res = await fetch("/api/config", { cache: "no-store" });
+        if (!res.ok) return;
+        const cfg = (await res.json()) as { enhancedVoice?: boolean };
+        if (!active || !cfg.enhancedVoice) return;
+        setEnhancedVoiceAvailable(true);
+        if (window.localStorage.getItem("skribbl-voice") === "enhanced") {
+          setVoiceMode("enhanced");
+        }
+      } catch {
+        // Flags are a nicety — never break the page over them.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function toggleVoiceMode() {
+    setVoiceMode((v) => {
+      const next: VoiceMode = v === "browser" ? "enhanced" : "browser";
+      try {
+        window.localStorage.setItem("skribbl-voice", next);
+      } catch {
+        // private mode etc.
+      }
+      track.voiceModeChanged(next);
+      return next;
+    });
+  }
 
   // Attachments are a long-form-only capability: drop them if the user
   // switches back to standard (or the trial runs out and we auto-switch).
@@ -416,6 +455,31 @@ export default function CreatePage() {
           </div>
         </div>
 
+        {/* Voice — only shown when the enhanced AI voice is configured */}
+        {enhancedVoiceAvailable && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">Voice</span>
+            <button
+              type="button"
+              onClick={toggleVoiceMode}
+              aria-pressed={voiceMode === "enhanced"}
+              className={cn(
+                "rounded-full border px-3 py-1 text-sm transition-colors",
+                voiceMode === "enhanced"
+                  ? "border-chalkboard bg-chalkboard text-paper"
+                  : "border-ink/30 text-ink hover:bg-muted",
+              )}
+            >
+              {voiceMode === "enhanced" ? "✨ Enhanced" : "Standard"}
+            </button>
+            <span className="text-xs text-muted-foreground">
+              {voiceMode === "enhanced"
+                ? "Natural AI narration"
+                : "Your device's built-in voice"}
+            </span>
+          </div>
+        )}
+
         {/* Length / format — long-form is premium */}
         <div className="space-y-1">
           <span className="text-sm font-medium">Length</span>
@@ -600,6 +664,8 @@ export default function CreatePage() {
             <AnimationPlayer
               animation={turn.result.animation}
               animationId={turn.result.animationId}
+              question={turn.question}
+              voiceMode={voiceMode}
             />
           </article>
         ))}

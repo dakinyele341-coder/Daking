@@ -43,6 +43,8 @@ function buildCsp(): string {
     `font-src 'self' data:`,
     // XHR/fetch/websocket targets: Supabase (REST+Realtime), Gemini, PostHog.
     `connect-src 'self' ${supabaseUrl} ${supabaseWs} ${geminiApi} ${posthog}`,
+    // Enhanced-voice narration plays TTS audio from blob: object URLs.
+    `media-src 'self' blob:`,
     // PostHog session replay spins up a web worker.
     `worker-src 'self' blob:`,
     // No plugins, no <base> hijacking, no being framed.

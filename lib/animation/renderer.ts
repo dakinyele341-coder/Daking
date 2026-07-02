@@ -750,6 +750,75 @@ export function elementDrawCost(element: AnimationElement): number {
   }
 }
 
+/**
+ * "Made with Skribbl" mark, bottom-right of every frame. Drawn last so it
+ * sits on top; subtle enough not to distract, present in every screen
+ * recording and exported video.
+ */
+export function drawWatermark(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): void {
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.font = `16px ${HANDWRITTEN_FONT}`;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "bottom";
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = INK_COLOR;
+  ctx.fillText("Made with Skribbl", width - 16, height - 12);
+  ctx.restore();
+}
+
+/**
+ * Burned-in caption line at the bottom of the canvas — used during video
+ * export so downloaded/recorded videos keep their subtitles (DOM captions
+ * aren't part of the canvas).
+ */
+export function drawBurnedCaption(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  width: number,
+  height: number,
+): void {
+  if (!text) return;
+  ctx.save();
+  ctx.setLineDash([]);
+  const fontSize = 26;
+  ctx.font = `500 ${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const padX = 18;
+  const padY = 10;
+  const metrics = ctx.measureText(text);
+  const boxW = Math.min(width - 48, metrics.width + padX * 2);
+  const boxH = fontSize + padY * 2;
+  const cx = width / 2;
+  const cy = height - 34 - boxH / 2;
+
+  // Dark pill behind light text (matches the on-page caption styling).
+  ctx.globalAlpha = 0.82;
+  ctx.fillStyle = INK_COLOR;
+  const r = 8;
+  const bx = cx - boxW / 2;
+  const by = cy - boxH / 2;
+  ctx.beginPath();
+  ctx.moveTo(bx + r, by);
+  ctx.arcTo(bx + boxW, by, bx + boxW, by + boxH, r);
+  ctx.arcTo(bx + boxW, by + boxH, bx, by + boxH, r);
+  ctx.arcTo(bx, by + boxH, bx, by, r);
+  ctx.arcTo(bx, by, bx + boxW, by, r);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#FAF7F0";
+  ctx.fillText(text, cx, cy + 1, boxW - padX * 2);
+  ctx.restore();
+}
+
 /** Paints the whiteboard background and clears the previous frame. */
 export function clearCanvas(
   ctx: CanvasRenderingContext2D,

@@ -20,11 +20,24 @@ import { CANVAS_WIDTH, CANVAS_HEIGHT } from "@/lib/types/animation";
 import {
   clearCanvas,
   drawElement,
+  drawWatermark,
+  drawBurnedCaption,
   elementDrawCost,
   type IconCache,
   type ImageCache,
 } from "@/lib/animation/renderer";
 import { pickBestVoice, waitForVoices } from "@/lib/animation/voice";
+
+/**
+ * Narration engine: the browser's built-in speechSynthesis, or "enhanced" —
+ * pre-rendered AI audio fetched from /api/tts (falls back to browser TTS on
+ * any failure, so enhanced mode can never break playback).
+ */
+export type VoiceMode = "browser" | "enhanced";
+
+export interface ControllerOptions {
+  voiceMode?: VoiceMode;
+}
 
 /** Tunable playback speeds (all times in ms). */
 export const SPEED = {
@@ -219,6 +232,17 @@ export class AnimationController {
   private boundarySeen = false;
 
   private voice: SpeechSynthesisVoice | null = null;
+  private readonly voiceMode: VoiceMode;
+
+  // Enhanced-voice playback state.
+  private audioEl: HTMLAudioElement | null = null;
+  /** narration text → object URL of its rendered audio (session cache, so
+   * replays and re-seeks never re-bill the TTS API). */
+  private readonly audioCache = new Map<string, string>();
+
+  /** When true, the current caption is also drawn ONTO the canvas (video
+   * export — DOM captions aren't part of the recorded canvas). */
+  private burnCaptions = false;
 
   constructor(
     ctx: CanvasRenderingContext2D,
@@ -226,12 +250,14 @@ export class AnimationController {
     icons: IconCache,
     images: ImageCache,
     callbacks: ControllerCallbacks = {},
+    options: ControllerOptions = {},
   ) {
     this.ctx = ctx;
     this.data = data;
     this.icons = icons;
     this.images = images;
     this.callbacks = callbacks;
+    this.voiceMode = options.voiceMode ?? "browser";
     this.sceneCount = data.scenes.length;
 
     this.plans = data.scenes.map((scene) =>
@@ -308,6 +334,7 @@ export class AnimationController {
     if (this.state !== "playing") return;
     this.cancelRaf();
     this.safeSpeech((s) => s.pause());
+    this.audioEl?.pause();
     this.setState("paused");
   }
 
@@ -315,6 +342,7 @@ export class AnimationController {
     if (this.state !== "paused") return;
     this.lastFrameAt = this.now(); // don't count the paused gap
     this.safeSpeech((s) => s.resume());
+    if (this.audioEl && !this.audioEl.ended) void this.audioEl.play().catch(() => {});
     this.setState("playing");
     this.loop();
   }
@@ -329,6 +357,7 @@ export class AnimationController {
     this.cancelRaf();
     this.speechGen++; // invalidate any in-flight utterance callbacks
     this.safeSpeech((s) => s.cancel());
+    this.stopAudio();
     this.sceneIndex = 0;
     this.setState("idle");
     clearCanvas(this.ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -339,6 +368,7 @@ export class AnimationController {
     const clamped = Math.max(0, Math.min(index, this.sceneCount - 1));
     this.cancelRaf();
     this.safeSpeech((s) => s.cancel());
+    this.stopAudio();
     this.sceneIndex = clamped;
     this.beginScene(clamped);
     this.setState("playing");
@@ -349,7 +379,18 @@ export class AnimationController {
     this.cancelRaf();
     this.speechGen++;
     this.safeSpeech((s) => s.cancel());
+    this.stopAudio();
+    for (const url of this.audioCache.values()) URL.revokeObjectURL(url);
+    this.audioCache.clear();
     this.state = "idle";
+  }
+
+  /**
+   * Toggles burned-in captions (drawn onto the canvas itself). Enabled during
+   * video export so the downloaded video keeps its subtitles.
+   */
+  setBurnCaptions(on: boolean): void {
+    this.burnCaptions = on;
   }
 
   getState(): PlaybackState {
@@ -366,6 +407,7 @@ export class AnimationController {
     this.virtualElapsed = 0;
     this.realElapsed = 0;
     this.lastFrameAt = this.now();
+    this.stopAudio();
     this.narrationStarted = false;
     this.drawingDone = false;
     this.speechDone = false;
@@ -451,12 +493,22 @@ export class AnimationController {
     }
   }
 
-  /** Time-based caption fallback for engines without boundary events. */
+  /**
+   * Time-based caption fallback for engines without boundary events. With
+   * enhanced (audio) narration the audio element's own clock gives an exact
+   * fraction; otherwise fall back to the word-count estimate.
+   */
   private estimateCaptionFromTime(plan: ScenePlan): void {
-    const speakable = Math.max(1, plan.narrationMs - SPEED.NARRATION_LEAD_MS);
-    const fraction = clamp01Local(
-      (this.realElapsed - SPEED.NARRATION_LEAD_MS) / speakable,
-    );
+    let fraction: number;
+    const audio = this.audioEl;
+    if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+      fraction = clamp01Local(audio.currentTime / audio.duration);
+    } else {
+      const speakable = Math.max(1, plan.narrationMs - SPEED.NARRATION_LEAD_MS);
+      fraction = clamp01Local(
+        (this.realElapsed - SPEED.NARRATION_LEAD_MS) / speakable,
+      );
+    }
     const captions = plan.captions;
     const last = captions[captions.length - 1]!;
     const charIndex = fraction * last.end;
@@ -485,6 +537,16 @@ export class AnimationController {
       }
 
       drawElement(this.ctx, element, progress, this.icons, this.images);
+    }
+
+    // Watermark sits on top of everything, once per frame.
+    drawWatermark(this.ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    // During export, captions are burned into the canvas so the recorded
+    // video keeps its subtitles.
+    if (this.burnCaptions) {
+      const caption = plan.captions[this.captionIndex]?.text ?? "";
+      drawBurnedCaption(this.ctx, caption, CANVAS_WIDTH, CANVAS_HEIGHT);
     }
   }
 
@@ -533,7 +595,14 @@ export class AnimationController {
 
   private speak(text: string): void {
     const token = this.speechGen;
+    if (this.voiceMode === "enhanced") {
+      void this.speakEnhanced(text, token);
+    } else {
+      this.speakBrowser(text, token);
+    }
+  }
 
+  private speakBrowser(text: string, token: number): void {
     const ran = this.safeSpeech((synth) => {
       synth.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
@@ -555,6 +624,68 @@ export class AnimationController {
     // No speech synthesis available → treat narration as instantly "done" so
     // pacing falls back to drawing duration only.
     if (!ran) this.speechDone = true;
+  }
+
+  /**
+   * Enhanced narration: fetches pre-rendered AI audio from /api/tts and plays
+   * it. Audio is cached per narration for the session (replays are free).
+   * ANY failure — network, 4xx/5xx, blocked autoplay — falls back to browser
+   * TTS so enhanced mode can never stall playback.
+   */
+  private async speakEnhanced(text: string, token: number): Promise<void> {
+    // Make sure no browser utterance is talking over the audio.
+    this.safeSpeech((s) => s.cancel());
+
+    let url = this.audioCache.get(text);
+    if (!url) {
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (!res.ok) throw new Error(`tts ${res.status}`);
+        const blob = await res.blob();
+        url = URL.createObjectURL(blob);
+        this.audioCache.set(text, url);
+      } catch {
+        if (token === this.speechGen) this.speakBrowser(text, token);
+        return;
+      }
+    }
+
+    if (token !== this.speechGen) return; // scene changed while fetching
+
+    const audio = new Audio(url);
+    this.audioEl = audio;
+    audio.onended = () => this.settleSpeech(token);
+    audio.onerror = () => this.settleSpeech(token);
+
+    // Don't autoplay into a pause the user hit while we were fetching;
+    // resume() starts it back up.
+    if (this.state !== "playing") return;
+    try {
+      await audio.play();
+    } catch {
+      // Autoplay blocked → browser TTS (which may itself no-op; the scene
+      // safety ceiling still guarantees progress).
+      this.audioEl = null;
+      if (token === this.speechGen) this.speakBrowser(text, token);
+    }
+  }
+
+  /** Halts and detaches the current enhanced-voice audio element (if any). */
+  private stopAudio(): void {
+    const audio = this.audioEl;
+    if (!audio) return;
+    this.audioEl = null;
+    audio.onended = null;
+    audio.onerror = null;
+    try {
+      audio.pause();
+    } catch {
+      // ignore
+    }
   }
 
   /** Marks speech finished, but only for the scene that started it. */

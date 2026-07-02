@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { AnimationData } from "@/lib/types/animation";
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from "@/lib/types/animation";
 import {
   AnimationController,
   type PlaybackState,
+  type VoiceMode,
 } from "@/lib/animation/controller";
 import {
   clearCanvas,
@@ -15,6 +17,7 @@ import {
 } from "@/lib/animation/renderer";
 import { Quiz } from "@/components/Quiz";
 import { Flashcards } from "@/components/Flashcards";
+import { ShareSection } from "@/components/ShareSection";
 import { track } from "@/lib/analytics/events";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +32,19 @@ interface AnimationPlayerProps {
    * DB row, so quiz submission would have nothing to attach to).
    */
   enableQuiz?: boolean;
+  /**
+   * The question this animation answers. Enables the share row and video
+   * download once playback finishes (omitted by the landing demo, whose
+   * sample id isn't a real shareable row).
+   */
+  question?: string;
+  /**
+   * Shared (/a/[id]) viewing mode: hides the study tools and shows a
+   * "Make your own" CTA instead — a shared viewer didn't ask this question.
+   */
+  isShared?: boolean;
+  /** Narration engine; "enhanced" uses AI audio via /api/tts. */
+  voiceMode?: VoiceMode;
 }
 
 /** Collects the distinct icon names referenced anywhere in the animation. */
@@ -84,6 +100,9 @@ export function AnimationPlayer({
   animation,
   animationId,
   enableQuiz = true,
+  question,
+  isShared = false,
+  voiceMode = "browser",
 }: AnimationPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<AnimationController | null>(null);
@@ -96,6 +115,12 @@ export function AnimationPlayer({
   const [captionsOn, setCaptionsOn] = useState(true);
   /** Current subtitle line (one phrase at a time, synced to the voice). */
   const [caption, setCaption] = useState("");
+
+  // Video export (MediaRecorder over the canvas stream).
+  const [exporting, setExporting] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const exportingRef = useRef(false);
 
   const sceneCount = animation.scenes.length;
   const currentNarration = animation.scenes[sceneIndex]?.narration ?? "";
@@ -132,29 +157,54 @@ export function AnimationPlayer({
 
     void Promise.all([...iconLoaders, ...imageLoaders, preloadCanvasFonts()]).then(() => {
       if (cancelled) return;
-      controllerRef.current = new AnimationController(ctx, animation, icons, images, {
-        onScene: (i) => setSceneIndex(i),
-        onProgress: (f) => setProgress(f),
-        onStateChange: (s) => setState(s),
-        onCaption: (text) => setCaption(text),
-        onComplete: () => {
-          track.animationCompleted(animation.scenes.length);
+      controllerRef.current = new AnimationController(
+        ctx,
+        animation,
+        icons,
+        images,
+        {
+          onScene: (i) => setSceneIndex(i),
+          onProgress: (f) => setProgress(f),
+          onStateChange: (s) => setState(s),
+          onCaption: (text) => setCaption(text),
+          onComplete: () => {
+            track.animationCompleted(animation.scenes.length);
+            // Export runs a full playback; stop the recorder half a beat
+            // after the last frame so the final image lands in the file.
+            if (exportingRef.current) {
+              setTimeout(() => recorderRef.current?.stop(), 500);
+            }
+          },
         },
-      });
+        { voiceMode },
+      );
       setReady(true);
     });
 
     return () => {
       cancelled = true;
+      // Abandon any in-flight export cleanly before tearing down.
+      exportingRef.current = false;
+      try {
+        recorderRef.current?.stop();
+      } catch {
+        // already stopped
+      }
+      recorderRef.current = null;
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
-  }, [animation]);
+  }, [animation, voiceMode]);
 
   // Auto-play once everything is loaded.
   useEffect(() => {
     if (ready) controllerRef.current?.play();
   }, [ready]);
+
+  // Measure how much traffic sharing drives.
+  useEffect(() => {
+    if (isShared) track.sharedAnimationViewed(animationId);
+  }, [isShared, animationId]);
 
   function handleToggle() {
     controllerRef.current?.toggle();
@@ -165,7 +215,76 @@ export function AnimationPlayer({
   }
 
   function handleSeek(index: number) {
+    if (exporting) return; // seeking would corrupt the recording
     controllerRef.current?.seekToScene(index);
+  }
+
+  /**
+   * Records a full playback of the animation off the canvas into a .webm
+   * download (captions burned in, watermark included). No server involved.
+   * NOTE: canvas capture is video-only — the narration audio can't be
+   * recorded from speechSynthesis, so exports rely on the burned captions.
+   */
+  function handleExport() {
+    const canvas = canvasRef.current;
+    const controller = controllerRef.current;
+    if (!canvas || !controller || exporting) return;
+    if (
+      typeof MediaRecorder === "undefined" ||
+      typeof canvas.captureStream !== "function"
+    ) {
+      alert("Video export isn't supported in this browser.");
+      return;
+    }
+
+    const mimeType =
+      [
+        "video/webm;codecs=vp9",
+        "video/webm;codecs=vp8",
+        "video/webm",
+      ].find((t) => MediaRecorder.isTypeSupported(t)) ?? "video/webm";
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(canvas.captureStream(30), {
+        mimeType,
+        videoBitsPerSecond: 4_000_000,
+      });
+    } catch {
+      alert("Video export isn't supported in this browser.");
+      return;
+    }
+
+    chunksRef.current = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    recorder.onstop = () => {
+      controller.setBurnCaptions(false);
+      const wasExporting = exportingRef.current;
+      exportingRef.current = false;
+      setExporting(false);
+      recorderRef.current = null;
+      if (!wasExporting || chunksRef.current.length === 0) return;
+      const blob = new Blob(chunksRef.current, { type: mimeType });
+      chunksRef.current = [];
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `skribbl-${animationId.slice(0, 8)}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+      track.videoExported();
+    };
+
+    // Restart playback from the top with captions burned into the canvas.
+    exportingRef.current = true;
+    setExporting(true);
+    recorderRef.current = recorder;
+    controller.stop();
+    controller.setBurnCaptions(true);
+    recorder.start(100);
+    controller.play();
   }
 
   const isFinished = state === "finished";
@@ -200,16 +319,18 @@ export function AnimationPlayer({
       <div className="flex items-center gap-2 sm:gap-3">
         <button
           onClick={isFinished ? handleReplay : handleToggle}
-          disabled={!ready}
+          disabled={!ready || exporting}
           className="shrink-0 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50 sm:px-4"
         >
           {!ready
             ? "Loading…"
-            : isFinished
-              ? "Replay"
-              : state === "playing"
-                ? "Pause"
-                : "Play"}
+            : exporting
+              ? `Recording… ${Math.round(progress * 100)}%`
+              : isFinished
+                ? "Replay"
+                : state === "playing"
+                  ? "Pause"
+                  : "Play"}
         </button>
 
         <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:text-sm">
@@ -248,7 +369,7 @@ export function AnimationPlayer({
             <button
               key={i}
               onClick={() => handleSeek(i)}
-              disabled={!ready}
+              disabled={!ready || exporting}
               aria-label={`Go to scene ${i + 1}`}
               className={cn(
                 "h-2.5 w-2.5 rounded-full transition-colors disabled:opacity-50",
@@ -267,9 +388,44 @@ export function AnimationPlayer({
         <p className="text-sm leading-relaxed text-ink">{animation.summary}</p>
       </div>
 
+      {/* Share + download — earned: only after the animation finishes. */}
+      {question && isFinished && (
+        <div className="space-y-3">
+          <ShareSection animationId={animationId} question={question} />
+          <div className="flex justify-center">
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="rounded-lg border border-ink px-4 py-2 text-sm font-medium text-ink transition hover:bg-ink hover:text-paper disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {exporting
+                ? `Recording… ${Math.round(progress * 100)}%`
+                : "⬇ Download video (.webm)"}
+            </button>
+          </div>
+          {exporting && (
+            <p className="text-center text-xs text-muted-foreground">
+              Re-playing and recording the animation — keep this tab open.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Shared view: the viewer didn't ask this question — invite them in. */}
+      {isShared && isFinished && (
+        <div className="flex justify-center pt-1">
+          <Link
+            href="/create"
+            className="rounded-lg bg-marker px-5 py-2.5 text-sm font-semibold text-paper transition hover:opacity-90"
+          >
+            Make your own →
+          </Link>
+        </div>
+      )}
+
       {/* Study tools — OPTIONAL, offered after the video finishes (never forced).
           Flashcards + quiz; click a tab to open, click again to close. */}
-      {enableQuiz && isFinished && (
+      {enableQuiz && !isShared && isFinished && (
         <div className="space-y-4 pt-1">
           <div className="flex flex-wrap gap-2">
             {hasFlashcards && (

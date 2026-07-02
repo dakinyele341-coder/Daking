@@ -33,4 +33,18 @@ export const track = {
   feedbackSubmitted(category: FeedbackCategory): void {
     captureEvent("feedback_submitted", { category });
   },
+  animationShared(
+    method: "copy_link" | "native_share" | "twitter" | "whatsapp",
+  ): void {
+    captureEvent("animation_shared", { method });
+  },
+  sharedAnimationViewed(animationId: string): void {
+    captureEvent("shared_animation_viewed", { animationId });
+  },
+  videoExported(): void {
+    captureEvent("video_exported");
+  },
+  voiceModeChanged(mode: "browser" | "enhanced"): void {
+    captureEvent("voice_mode_changed", { mode });
+  },
 } as const;

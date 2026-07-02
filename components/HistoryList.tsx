@@ -46,6 +46,7 @@ export function HistoryList({ items }: { items: HistoryItem[] }) {
             key={selected.historyId}
             animation={selected.animation}
             animationId={selected.animationId}
+            question={selected.questionText}
           />
         </div>
       )}

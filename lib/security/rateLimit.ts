@@ -78,6 +78,18 @@ export const uploadLimiter = new Ratelimit({
   prefix: `${PREFIX}:upload`,
 });
 
+/**
+ * Enhanced-voice TTS calls (ElevenLabs — billed per character). One scene =
+ * one call; an animation has ~5-15 scenes, so 150/hour ≈ 10-25 full plays.
+ * The client also caches audio per narration for the session.
+ */
+export const ttsLimiter = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(150, "1 h"),
+  analytics: true,
+  prefix: `${PREFIX}:tts`,
+});
+
 export interface RateLimitResult {
   success: boolean;
   /** Requests remaining in the current window. */
