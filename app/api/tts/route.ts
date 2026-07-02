@@ -93,7 +93,14 @@ async function handleTts(request: NextRequest) {
   });
 
   if (!upstream.ok || !upstream.body) {
-    console.error("[Skribbl] ElevenLabs error:", upstream.status);
+    // Surface the upstream reason in server logs (e.g. a key missing the
+    // text_to_speech permission) — never in the client response.
+    const detail = await upstream.text().catch(() => "");
+    console.error(
+      "[Skribbl] ElevenLabs error:",
+      upstream.status,
+      detail.slice(0, 300),
+    );
     return NextResponse.json({ error: "TTS service error." }, { status: 502 });
   }
 
