@@ -52,9 +52,14 @@ export const SPEED = {
   /**
    * Estimated ms the narration takes per word at the rate above. Used to PACE
    * the drawing so strokes appear while the line is being spoken (rather than
-   * finishing early and sitting idle). Tuned to typical Web Speech timing.
+   * finishing early and sitting idle). Deliberately on the SLOW side — many
+   * voices (Google's remote voices especially) speak slower than the classic
+   * estimate and fire no boundary events, and captions that lag slightly feel
+   * fine while captions that lead the voice feel broken. A per-playback
+   * calibration (see speechRateFactor) corrects the estimate from the actual
+   * spoken duration of earlier scenes.
    */
-  MS_PER_WORD: 360,
+  MS_PER_WORD: 400,
   /** Small lead-in before speech actually starts (engine warm-up). */
   NARRATION_LEAD_MS: 250,
   /**
@@ -89,14 +94,14 @@ export interface ControllerCallbacks {
   onCaption?: (text: string) => void;
 }
 
-interface ScheduledElement {
+export interface ScheduledElement {
   index: number;
   start: number; // ms from scene start
   end: number; // ms from scene start
 }
 
 /** One subtitle line: its text plus its character range in the narration. */
-interface CaptionChunk {
+export interface CaptionChunk {
   text: string;
   /** Index of the chunk's first character in the full narration string. */
   start: number;
@@ -104,14 +109,14 @@ interface CaptionChunk {
   end: number;
 }
 
-interface ScenePlan {
+export interface ScenePlan {
   drawDuration: number;
   narrationMs: number;
   elements: ScheduledElement[];
   captions: CaptionChunk[];
 }
 
-function easeInOutQuad(t: number): number {
+export function easeInOutQuad(t: number): number {
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
 
@@ -194,6 +199,57 @@ function pushChunk(
   if (text.length > 0) chunks.push({ text, start, end });
 }
 
+/**
+ * Builds the timing plan for one scene: when each element draws, how long the
+ * scene spans, and its caption chunks. Shared by live playback (the
+ * controller) and offline video export (lib/animation/exporter.ts) so both
+ * produce identical pacing.
+ */
+export function planScene(
+  elements: AnimationData["scenes"][number]["elements"],
+  narration: string,
+): ScenePlan {
+  // 1. Raw drawing time from each element's "ink cost".
+  const scheduled: ScheduledElement[] = [];
+  let rawDuration = 0;
+  elements.forEach((el, index) => {
+    const dur =
+      el.type === "icon"
+        ? SPEED.ICON_DRAW_MS
+        : Math.max(SPEED.MIN_ELEMENT_MS, elementDrawCost(el) / SPEED.DRAW_PX_PER_MS);
+    scheduled.push({ index, start: rawDuration, end: rawDuration + dur });
+    rawDuration += dur;
+  });
+
+  // 2. Fit the schedule to the spoken narration: stretch a light scene so
+  //    strokes land WHILE the words are said, and COMPRESS a drawing-heavy
+  //    scene toward the narration (capped at MAX_DRAW_SPEEDUP so it never
+  //    blurs) so the board doesn't keep scratching long after the voice
+  //    stopped. Event-driven advance still corrects any estimate drift, and
+  //    the runtime catch-up clock handles a voice that's faster than the
+  //    estimate.
+  const narrationMs = estimateNarrationMs(narration);
+  const span = Math.max(
+    Math.min(rawDuration, Math.max(narrationMs, rawDuration / SPEED.MAX_DRAW_SPEEDUP)),
+    narrationMs,
+    SPEED.MIN_SCENE_MS,
+  );
+  const scale = rawDuration > 0 ? span / rawDuration : 1;
+  if (scale !== 1) {
+    for (const s of scheduled) {
+      s.start *= scale;
+      s.end *= scale;
+    }
+  }
+
+  return {
+    drawDuration: span,
+    narrationMs,
+    elements: scheduled,
+    captions: chunkNarration(narration),
+  };
+}
+
 export class AnimationController {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly data: AnimationData;
@@ -230,6 +286,13 @@ export class AnimationController {
   private captionIndex = -1;
   /** True once this scene received a real speech word-boundary event. */
   private boundarySeen = false;
+  /**
+   * How much slower/faster the ACTUAL voice is vs. the word-count estimate
+   * (actual ÷ estimated, EMA across scenes). Voices that fire no boundary
+   * events rely on the estimate for caption timing — this calibrates it from
+   * each finished scene so captions stop racing ahead of a slow voice.
+   */
+  private speechRateFactor = 1;
 
   private voice: SpeechSynthesisVoice | null = null;
   private readonly voiceMode: VoiceMode;
@@ -261,7 +324,7 @@ export class AnimationController {
     this.sceneCount = data.scenes.length;
 
     this.plans = data.scenes.map((scene) =>
-      this.planScene(scene.elements, scene.narration),
+      planScene(scene.elements, scene.narration),
     );
 
     // Pick the nicest voice once it's available (async); until then we fall
@@ -269,53 +332,6 @@ export class AnimationController {
     void waitForVoices().then((voices) => {
       this.voice = pickBestVoice(voices);
     });
-  }
-
-  // ---- Planning -------------------------------------------------------------
-
-  private planScene(
-    elements: AnimationData["scenes"][number]["elements"],
-    narration: string,
-  ): ScenePlan {
-    // 1. Raw drawing time from each element's "ink cost".
-    const scheduled: ScheduledElement[] = [];
-    let rawDuration = 0;
-    elements.forEach((el, index) => {
-      const dur =
-        el.type === "icon"
-          ? SPEED.ICON_DRAW_MS
-          : Math.max(SPEED.MIN_ELEMENT_MS, elementDrawCost(el) / SPEED.DRAW_PX_PER_MS);
-      scheduled.push({ index, start: rawDuration, end: rawDuration + dur });
-      rawDuration += dur;
-    });
-
-    // 2. Fit the schedule to the spoken narration: stretch a light scene so
-    //    strokes land WHILE the words are said, and COMPRESS a drawing-heavy
-    //    scene toward the narration (capped at MAX_DRAW_SPEEDUP so it never
-    //    blurs) so the board doesn't keep scratching long after the voice
-    //    stopped. Event-driven advance still corrects any estimate drift, and
-    //    the runtime catch-up clock handles a voice that's faster than the
-    //    estimate.
-    const narrationMs = estimateNarrationMs(narration);
-    const span = Math.max(
-      Math.min(rawDuration, Math.max(narrationMs, rawDuration / SPEED.MAX_DRAW_SPEEDUP)),
-      narrationMs,
-      SPEED.MIN_SCENE_MS,
-    );
-    const scale = rawDuration > 0 ? span / rawDuration : 1;
-    if (scale !== 1) {
-      for (const s of scheduled) {
-        s.start *= scale;
-        s.end *= scale;
-      }
-    }
-
-    return {
-      drawDuration: span,
-      narrationMs,
-      elements: scheduled,
-      captions: chunkNarration(narration),
-    };
   }
 
   // ---- Public controls ------------------------------------------------------
@@ -504,7 +520,11 @@ export class AnimationController {
     if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
       fraction = clamp01Local(audio.currentTime / audio.duration);
     } else {
-      const speakable = Math.max(1, plan.narrationMs - SPEED.NARRATION_LEAD_MS);
+      // Word-count estimate, scaled by how fast this playback's voice has
+      // actually been speaking so far (see settleSpeech calibration).
+      const speakable =
+        Math.max(1, plan.narrationMs - SPEED.NARRATION_LEAD_MS) *
+        this.speechRateFactor;
       fraction = clamp01Local(
         (this.realElapsed - SPEED.NARRATION_LEAD_MS) / speakable,
       );
@@ -692,6 +712,17 @@ export class AnimationController {
   private settleSpeech(token: number): void {
     if (token !== this.speechGen) return; // stale (scene changed)
     this.speechDone = true;
+
+    // Calibrate the caption-timing estimate from how long the voice ACTUALLY
+    // took (real time from scene start to speech end vs. the estimate).
+    const plan = this.plans[this.sceneIndex];
+    if (plan && plan.narrationMs > SPEED.NARRATION_LEAD_MS) {
+      const sample = this.realElapsed / plan.narrationMs;
+      if (Number.isFinite(sample) && sample > 0.4 && sample < 3) {
+        // EMA: adapt quickly (voice engines are consistent within a playback).
+        this.speechRateFactor = this.speechRateFactor * 0.4 + sample * 0.6;
+      }
+    }
   }
 
   /** Runs `fn` with the speech engine if present; returns whether it ran. */

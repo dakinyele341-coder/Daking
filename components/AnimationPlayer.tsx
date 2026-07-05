@@ -15,6 +15,10 @@ import {
   type IconCache,
   type ImageCache,
 } from "@/lib/animation/renderer";
+import {
+  exportAnimationToMp4,
+  isOfflineExportSupported,
+} from "@/lib/animation/exporter";
 import { Quiz } from "@/components/Quiz";
 import { Flashcards } from "@/components/Flashcards";
 import { ShareSection } from "@/components/ShareSection";
@@ -116,11 +120,16 @@ export function AnimationPlayer({
   /** Current subtitle line (one phrase at a time, synced to the voice). */
   const [caption, setCaption] = useState("");
 
-  // Video export (MediaRecorder over the canvas stream).
+  // Video export. Preferred path: offline WebCodecs render straight to MP4
+  // (fast, reliable, AI voice track when configured). Fallback: MediaRecorder
+  // over a live replay (webm, captions only).
   const [exporting, setExporting] = useState(false);
+  const [exportPct, setExportPct] = useState(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const exportingRef = useRef(false);
+  /** Icon/image caches from the load effect, reused by the offline exporter. */
+  const assetsRef = useRef<{ icons: IconCache; images: ImageCache } | null>(null);
 
   const sceneCount = animation.scenes.length;
   const currentNarration = animation.scenes[sceneIndex]?.narration ?? "";
@@ -157,6 +166,7 @@ export function AnimationPlayer({
 
     void Promise.all([...iconLoaders, ...imageLoaders, preloadCanvasFonts()]).then(() => {
       if (cancelled) return;
+      assetsRef.current = { icons, images };
       controllerRef.current = new AnimationController(
         ctx,
         animation,
@@ -164,7 +174,11 @@ export function AnimationPlayer({
         images,
         {
           onScene: (i) => setSceneIndex(i),
-          onProgress: (f) => setProgress(f),
+          onProgress: (f) => {
+            setProgress(f);
+            // Fallback export records a live replay — mirror its progress.
+            if (exportingRef.current) setExportPct(f);
+          },
           onStateChange: (s) => setState(s),
           onCaption: (text) => setCaption(text),
           onComplete: () => {
@@ -219,16 +233,58 @@ export function AnimationPlayer({
     controllerRef.current?.seekToScene(index);
   }
 
+  /** Downloads a blob as a file. */
+  function downloadBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   /**
-   * Records a full playback of the animation off the canvas into a .webm
-   * download (captions burned in, watermark included). No server involved.
-   * NOTE: canvas capture is video-only — the narration audio can't be
-   * recorded from speechSynthesis, so exports rely on the burned captions.
+   * Video download. Preferred: offline WebCodecs render → MP4 in seconds,
+   * with the AI narration as a real audio track when /api/tts is configured
+   * and captions burned in. Falls back to recording a live replay (webm)
+   * on browsers without WebCodecs.
    */
-  function handleExport() {
+  async function handleExport() {
+    if (exporting || !ready) return;
+    const assets = assetsRef.current;
+
+    if (assets && isOfflineExportSupported()) {
+      setExporting(true);
+      setExportPct(0);
+      try {
+        const blob = await exportAnimationToMp4(
+          animation,
+          assets.icons,
+          assets.images,
+          (p) => setExportPct(p.fraction),
+        );
+        downloadBlob(blob, `skribbl-${animationId.slice(0, 8)}.mp4`);
+        track.videoExported();
+        return;
+      } catch (err) {
+        console.warn("[Skribbl] Offline export failed; falling back to recording:", err);
+      } finally {
+        setExporting(false);
+      }
+    }
+
+    recordViaPlayback();
+  }
+
+  /**
+   * Legacy fallback: records a full live replay off the canvas into a .webm
+   * (captions burned in, watermark included). Video-only — speechSynthesis
+   * can't be captured, so the burned captions carry the narration.
+   */
+  function recordViaPlayback() {
     const canvas = canvasRef.current;
     const controller = controllerRef.current;
-    if (!canvas || !controller || exporting) return;
+    if (!canvas || !controller || exportingRef.current) return;
     if (
       typeof MediaRecorder === "undefined" ||
       typeof canvas.captureStream !== "function"
@@ -280,6 +336,7 @@ export function AnimationPlayer({
     // Restart playback from the top with captions burned into the canvas.
     exportingRef.current = true;
     setExporting(true);
+    setExportPct(0);
     recorderRef.current = recorder;
     controller.stop();
     controller.setBurnCaptions(true);
@@ -325,7 +382,7 @@ export function AnimationPlayer({
           {!ready
             ? "Loading…"
             : exporting
-              ? `Recording… ${Math.round(progress * 100)}%`
+              ? `Exporting… ${Math.round(exportPct * 100)}%`
               : isFinished
                 ? "Replay"
                 : state === "playing"
@@ -394,18 +451,19 @@ export function AnimationPlayer({
           <ShareSection animationId={animationId} question={question} />
           <div className="flex justify-center">
             <button
-              onClick={handleExport}
+              onClick={() => void handleExport()}
               disabled={exporting}
               className="rounded-lg border border-ink px-4 py-2 text-sm font-medium text-ink transition hover:bg-ink hover:text-paper disabled:cursor-not-allowed disabled:opacity-50"
             >
               {exporting
-                ? `Recording… ${Math.round(progress * 100)}%`
-                : "⬇ Download video (.webm)"}
+                ? `Preparing video… ${Math.round(exportPct * 100)}%`
+                : "⬇ Download video"}
             </button>
           </div>
           {exporting && (
             <p className="text-center text-xs text-muted-foreground">
-              Re-playing and recording the animation — keep this tab open.
+              Rendering your video with narration and captions — keep this tab
+              open, it only takes a moment.
             </p>
           )}
         </div>

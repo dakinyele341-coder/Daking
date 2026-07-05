@@ -29,14 +29,14 @@ const FORMAT_CONFIG: Record<
 > = {
   standard: {
     scenes:
-      "Use as many scenes as the explanation genuinely needs — usually 4 to 8. A simple question may need fewer; a richer one more. Never pad to hit a number.",
+      "Use as many scenes as the explanation genuinely needs — usually 4 to 8. A simple question may need fewer; a richer one more. Never pad to hit a number. At most 5 scenes may be illustrated (\"image\") scenes — make the rest diagram scenes.",
     quiz: "Write 3 to 5 quiz questions, scaled to how much was covered.",
     flashcards: "5 to 8 flashcards.",
     maxOutputTokens: 16384,
   },
   long: {
     scenes:
-      "This is an in-depth, long-form explanation: cover the topic thoroughly and progressively, typically 10 to 16 scenes. Structure it like a documentary: set up the big question, build the mechanism piece by piece, cover the important nuances and edge cases, then tie it all together. Go deep, but every scene must add real understanding — no filler.",
+      "This is an in-depth, long-form explanation: cover the topic thoroughly and progressively, typically 10 to 16 scenes. Structure it like a documentary: set up the big question, build the mechanism piece by piece, cover the important nuances and edge cases, then tie it all together. Go deep, but every scene must add real understanding — no filler. At most 8 scenes may be illustrated (\"image\") scenes — make the rest diagram scenes (the image pipeline can only generate a limited number per video).",
     quiz: "Write 5 to 8 quiz questions covering the breadth of the explanation.",
     flashcards: "8 to 14 flashcards.",
     maxOutputTokens: 32768,

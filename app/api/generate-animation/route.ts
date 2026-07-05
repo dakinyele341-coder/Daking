@@ -418,10 +418,14 @@ async function buildIllustratedAnimation(
   const scenes: unknown[] = [];
   model.scenes.forEach((scene, si) => {
     const elements: unknown[] = [];
+    let droppedImage = false;
     scene.elements.forEach((el, ei) => {
       if (el.type === "image") {
         const url = urlByKey.get(`${si}-${ei}`);
-        if (!url) return; // failed / over cap — drop
+        if (!url) {
+          droppedImage = true; // failed / over cap — drop
+          return;
+        }
         elements.push({
           type: "image",
           url,
@@ -435,7 +439,15 @@ async function buildIllustratedAnimation(
         elements.push(el);
       }
     });
-    if (elements.length > 0) scenes.push({ ...scene, elements });
+    if (elements.length === 0) return;
+    // An illustrated scene is an image + (at most) a short caption. If the
+    // image was dropped, what's left is a caption on a blank board while the
+    // narration talks about a visual that isn't there — drop the whole scene
+    // rather than ship a blank one.
+    if (droppedImage && elements.every((e) => (e as { type: string }).type === "text")) {
+      return;
+    }
+    scenes.push({ ...scene, elements });
   });
 
   return {
